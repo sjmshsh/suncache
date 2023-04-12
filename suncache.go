@@ -3,6 +3,7 @@ package suncache
 import (
 	"fmt"
 	"log"
+	"suncache/singleflight"
 	"sync"
 )
 
@@ -12,6 +13,7 @@ type Group struct {
 	getter    Getter // 缓存没有命中的时候获取源数据的回调
 	mainCache cache  // 一开始实现的并发缓存
 	peers     PeerPicker
+	loader    *singleflight.Group
 }
 
 var (
@@ -39,6 +41,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 		mainCache: cache{
 			cacheBytes: cacheBytes,
 		},
+		loader: &singleflight.Group{},
 	}
 	groups[name] = g
 	return g
@@ -78,15 +81,21 @@ func (g *Group) Get(key string) (ByteView, error) {
 }
 
 func (g *Group) load(key string) (value ByteView, err error) {
-	if g.peers != nil {
-		if peer, ok := g.peers.PickPeer(key); ok {
-			if value, err = g.getFromPeer(peer, key); err == nil {
-				return value, nil
+	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		if g.peers != nil {
+			if peer, ok := g.peers.PickPeer(key); ok {
+				if value, err = g.getFromPeer(peer, key); err == nil {
+					return value, nil
+				}
 			}
+			log.Println("[SunCache] Failed to get from peer", err)
 		}
-		log.Println("[SunCache] Failed to get from peer", err)
+		return g.getLocally(key)
+	})
+	if err != nil {
+		return viewi.(ByteView), nil
 	}
-	return g.getLocally(key)
+	return
 }
 
 func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
